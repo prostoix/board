@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Messages</title>
+    <style>
+        body {
+            background: black;
+            color: #0f0;
+            font-family: monospace;
+            margin: 0;
+            padding: 10px;
+            font-size: 14px;
+        }
+        .msg {
+            border: 1px solid #333;
+            margin: 5px 0;
+            padding: 8px;
+            background: #111;
+        }
+        .time {
+            color: #666;
+            font-size: 12px;
+        }
+        .status {
+            position: fixed;
+            top: 5px;
+            right: 5px;
+            background: #222;
+            padding: 3px 6px;
+            border: 1px solid #333;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="status" id="status">Loading...</div>
+    <div id="messages"></div>
+
+    <script>
+        var lastId = 0;
+        var errorCount = 0;
+        
+        function loadMessages() {
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', '/poll?last_id=' + lastId, true);
+            xhr.timeout = 10000;
+            
+            xhr.onload = function() {
+                if (xhr.status === 200) {
+                    try {
+                        var data = JSON.parse(xhr.responseText);
+                        errorCount = 0;
+                        
+                        if (data.messages && data.messages.length > 0) {
+                            for (var i = 0; i < data.messages.length; i++) {
+                                var msg = data.messages[i];
+                                addMessage(msg);
+                                lastId = msg.id;
+                            }
+                        }
+                        document.getElementById('status').innerHTML = 'OK';
+                    } catch(e) {
+                        errorCount++;
+                        document.getElementById('status').innerHTML = 'Parse error';
+                    }
+                } else {
+                    errorCount++;
+                    document.getElementById('status').innerHTML = 'Error ' + xhr.status;
+                }
+                
+                // Продолжаем опрос
+                setTimeout(loadMessages, errorCount > 3 ? 10000 : 2000);
+            };
+            
+            xhr.onerror = function() {
+                errorCount++;
+                document.getElementById('status').innerHTML = 'Network error';
+                setTimeout(loadMessages, errorCount > 3 ? 15000 : 5000);
+            };
+            
+            xhr.ontimeout = function() {
+                errorCount++;
+                document.getElementById('status').innerHTML = 'Timeout';
+                setTimeout(loadMessages, errorCount > 3 ? 15000 : 5000);
+            };
+            
+            xhr.send();
+        }
+        
+        function addMessage(msg) {
+            var div = document.createElement('div');
+            div.className = 'msg';
+            
+            var time = new Date().toLocaleTimeString();
+            div.innerHTML = '<div class="time">' + time + ' [ID:' + msg.id + ']</div>' +
+                           '<div>' + (msg.formatted || msg.raw) + '</div>';
+            
+            document.getElementById('messages').appendChild(div);
+            
+            // Прокрутка вниз
+            window.scrollTo(0, document.body.scrollHeight);
+        }
+        
+        // Начинаем загрузку
+        loadMessages();
+        
+        // Автопрокрутка при изменении размера
+        window.onresize = function() {
+            window.scrollTo(0, document.body.scrollHeight);
+        };
+    </script>
+</body>
+</html>
