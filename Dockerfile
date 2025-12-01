@@ -21,15 +21,15 @@ COPY main.py .
 COPY config.py .
 COPY nginx.conf /etc/nginx/nginx.conf
 
-# Копируем модули
+# Копируем модули с init файлами
 COPY database/ /app/database/
 COPY message_processing/ /app/message_processing/
 COPY websocket_manager/ /app/websocket_manager/
 COPY rabbitmq_client/ /app/rabbitmq_client/
 
 # Копируем HTML страницу
-COPY static/index.html /app/static/index.html
+COPY static/ /app/static/
 
 EXPOSE 8050
 
-CMD service nginx start && uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+CMD service nginx start && uvicorn main:app --host 0.0.0.0 --port 8000
