@@ -1,11 +1,18 @@
 import sqlite3
 import os
+import json
+import asyncio
+import aio_pika
 from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 app = FastAPI()
+
+# Конфигурация RabbitMQ
+RABBITMQ_HOST = "192.168.1.137"
+RABBITMQ_QUEUE = "to_board"
 
 # Инициализация базы данных
 def init_db():
@@ -41,6 +48,55 @@ def save_message(message):
 # WebSocket соединения
 active_connections = []
 
+# RabbitMQ connection
+rabbit_connection = None
+rabbit_channel = None
+
+async def connect_rabbitmq():
+    global rabbit_connection, rabbit_channel
+    try:
+        rabbit_connection = await aio_pika.connect_robust(
+            f"amqp://guest:guest@{RABBITMQ_HOST}/"
+        )
+        rabbit_channel = await rabbit_connection.channel()
+        await rabbit_channel.declare_queue(RABBITMQ_QUEUE, durable=True)
+        print("Connected to RabbitMQ")
+    except Exception as e:
+        print(f"RabbitMQ connection error: {e}")
+
+async def consume_rabbitmq():
+    try:
+        queue = await rabbit_channel.declare_queue(RABBITMQ_QUEUE, durable=True)
+        
+        async for message in queue:
+            async with message.process():
+                message_text = message.body.decode()
+                print(f"Received from RabbitMQ: {message_text}")
+                
+                # Сохраняем в БД
+                save_message(message_text)
+                
+                # Отправляем всем WebSocket клиентам
+                for connection in active_connections:
+                    try:
+                        await connection.send_text(message_text)
+                    except:
+                        active_connections.remove(connection)
+    except Exception as e:
+        print(f"RabbitMQ consume error: {e}")
+
+async def publish_to_rabbitmq(message: str):
+    try:
+        if rabbit_channel:
+            await rabbit_channel.default_exchange.publish(
+                aio_pika.Message(body=message.encode()),
+                routing_key=RABBITMQ_QUEUE
+            )
+            return True
+    except Exception as e:
+        print(f"RabbitMQ publish error: {e}")
+    return False
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -53,6 +109,9 @@ async def websocket_endpoint(websocket: WebSocket):
             if message:
                 # Сохраняем сообщение в БД
                 save_message(message)
+                
+                # Публикуем в RabbitMQ
+                await publish_to_rabbitmq(message)
                 
                 # Рассылаем всем подключенным клиентам
                 for connection in active_connections:
@@ -72,178 +131,281 @@ async def get_last_message_api():
 async def read_index():
     return FileResponse('/app/static/index.html')
 
-# HTML страница
+# HTML страница (адаптированная для мобильных)
 html_content = """
 <!DOCTYPE html>
 <html>
 <head>
     <title>WebSocket Messages</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
         body { 
-            font-family: Arial, sans-serif; 
-            margin: 40px; 
-            background-color: #f5f5f5;
-        }
-        .container {
-            max-width: 800px;
-            margin: 0 auto;
-            background: white;
-            padding: 30px;
-            border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-        h1 { 
-            color: #333; 
-            text-align: center;
-        }
-        #lastMessage { 
-            border: 2px solid #4CAF50;
-            padding: 20px;
-            margin: 20px 0;
-            background-color: #f9f9f9;
-            border-radius: 5px;
-            font-size: 18px;
-            font-weight: bold;
-        }
-        #messages { 
-            border: 1px solid #ddd; 
-            padding: 20px; 
-            min-height: 200px; 
-            margin: 20px 0;
-            border-radius: 5px;
-            background-color: #fafafa;
-        }
-        .input-group {
+            margin: 0;
+            padding: 0;
+            background-color: #000000;
+            color: #00ff00;
+            font-family: 'Courier New', monospace;
+            height: 100vh;
             display: flex;
-            gap: 10px;
-            margin: 20px 0;
+            flex-direction: column;
+            overflow: hidden;
+            font-size: 14px;
         }
-        #messageInput { 
+        
+        .container {
             flex: 1;
-            padding: 12px; 
-            border: 1px solid #ddd;
-            border-radius: 5px;
-            font-size: 16px;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            max-height: -webkit-fill-available;
         }
-        button { 
-            padding: 12px 24px; 
-            background-color: #4CAF50;
-            color: white;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
-            font-size: 16px;
+        
+        .header {
+            padding: 10px 15px;
+            background: #111;
+            border-bottom: 1px solid #333;
+            font-size: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
         }
-        button:hover {
-            background-color: #45a049;
-        }
-        .message {
-            padding: 10px;
-            margin: 5px 0;
-            background: white;
-            border-left: 4px solid #4CAF50;
-            border-radius: 3px;
-        }
+        
         .status {
+            color: #666;
+        }
+        
+        .status.connected {
+            color: #00ff00;
+        }
+        
+        #messages { 
+            flex: 1;
             padding: 10px;
-            margin: 10px 0;
-            border-radius: 5px;
-            text-align: center;
+            overflow-y: auto;
+            overflow-x: hidden;
+            border: none;
+            line-height: 1.4;
+            -webkit-overflow-scrolling: touch;
         }
-        .connected {
-            background-color: #d4edda;
-            color: #155724;
-            border: 1px solid #c3e6cb;
+        
+        .input-container {
+            padding: 15px;
+            border-top: 1px solid #333;
+            background: #111;
         }
-        .disconnected {
-            background-color: #f8d7da;
-            color: #721c24;
-            border: 1px solid #f5c6cb;
+        
+        #messageInput { 
+            width: 100%;
+            padding: 12px;
+            background: #000;
+            color: #00ff00;
+            border: 1px solid #333;
+            font-family: 'Courier New', monospace;
+            font-size: 16px;
+            outline: none;
+            border-radius: 0;
+            -webkit-appearance: none;
+        }
+        
+        #messageInput:focus {
+            border-color: #00ff00;
+        }
+        
+        .message {
+            margin: 8px 0;
+            padding: 10px;
+            border-left: 2px solid #00ff00;
+            background: #111;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }
+        
+        .system-message {
+            color: #666;
+            border-left-color: #666;
+            font-style: italic;
+        }
+        
+        .timestamp {
+            color: #666;
+            font-size: 11px;
+            margin-right: 8px;
+        }
+        
+        /* Мобильная оптимизация */
+        @media (max-width: 768px) {
+            body {
+                font-size: 12px;
+            }
+            
+            .header {
+                padding: 8px 12px;
+                font-size: 11px;
+            }
+            
+            #messages {
+                padding: 8px;
+            }
+            
+            .input-container {
+                padding: 12px;
+            }
+            
+            #messageInput {
+                padding: 10px;
+                font-size: 14px;
+            }
+            
+            .message {
+                margin: 6px 0;
+                padding: 8px;
+            }
+        }
+        
+        /* Портретная ориентация */
+        @media (max-width: 480px) and (orientation: portrait) {
+            .container {
+                height: 100vh;
+            }
+        }
+        
+        /* Ландшафтная ориентация */
+        @media (max-width: 850px) and (orientation: landscape) {
+            .header {
+                padding: 5px 10px;
+                font-size: 10px;
+            }
+            
+            #messages {
+                padding: 5px;
+            }
+            
+            .message {
+                margin: 3px 0;
+                padding: 5px;
+            }
+        }
+        
+        /* Скроллбар для WebKit */
+        #messages::-webkit-scrollbar {
+            width: 4px;
+        }
+        
+        #messages::-webkit-scrollbar-track {
+            background: #000;
+        }
+        
+        #messages::-webkit-scrollbar-thumb {
+            background: #333;
+        }
+        
+        #messages::-webkit-scrollbar-thumb:hover {
+            background: #555;
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>WebSocket Message Display</h1>
+        <div class="header">
+            <div>WebSocket Messages</div>
+            <div id="status" class="status">Connecting...</div>
+        </div>
         
-        <div id="status" class="status"></div>
-        
-        <h3>📨 Last Received Message:</h3>
-        <div id="lastMessage">Loading...</div>
-        
-        <h3>📝 All Messages:</h3>
         <div id="messages"></div>
         
-        <div class="input-group">
-            <input type="text" id="messageInput" placeholder="Type your message here...">
-            <button onclick="sendMessage()">Send Message</button>
+        <div class="input-container">
+            <input type="text" id="messageInput" placeholder="Type message and press Enter..." autocomplete="off">
         </div>
     </div>
 
     <script>
         let socket = null;
-        let reconnectAttempts = 0;
-        const maxReconnectAttempts = 5;
+        let isConnected = false;
 
         function connect() {
             socket = new WebSocket("ws://" + window.location.host + "/ws");
             
             socket.onopen = function(e) {
-                console.log("WebSocket connected");
-                updateStatus("Connected", "connected");
-                reconnectAttempts = 0;
+                isConnected = true;
+                updateStatus("CONNECTED", true);
+                addSystemMessage("Connected to server");
                 loadLastMessage();
             };
             
             socket.onmessage = function(event) {
                 const message = event.data;
-                // Обновляем последнее сообщение
-                document.getElementById("lastMessage").innerText = message;
-                
-                // Добавляем в список сообщений
-                const messagesDiv = document.getElementById("messages");
-                const messageElement = document.createElement("div");
-                messageElement.className = "message";
-                messageElement.innerHTML = `<strong>${new Date().toLocaleString()}:</strong> ${message}`;
-                messagesDiv.appendChild(messageElement);
-                
-                // Прокручиваем вниз
-                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                addMessage(message);
             };
             
             socket.onclose = function(event) {
-                console.log("WebSocket disconnected");
-                updateStatus("Disconnected - Attempting to reconnect...", "disconnected");
-                
-                if (reconnectAttempts < maxReconnectAttempts) {
-                    setTimeout(() => {
-                        reconnectAttempts++;
-                        connect();
-                    }, 2000);
-                }
+                isConnected = false;
+                updateStatus("DISCONNECTED", false);
+                addSystemMessage("Disconnected from server");
+                setTimeout(connect, 3000);
             };
             
             socket.onerror = function(error) {
-                console.error("WebSocket error:", error);
-                updateStatus("Connection error", "disconnected");
+                updateStatus("ERROR", false);
+                addSystemMessage("Connection error");
             };
         }
 
-        function updateStatus(text, className) {
-            const statusDiv = document.getElementById("status");
-            statusDiv.textContent = text;
-            statusDiv.className = "status " + className;
+        function updateStatus(text, connected) {
+            const statusElement = document.getElementById("status");
+            statusElement.textContent = text;
+            statusElement.className = "status" + (connected ? " connected" : "");
+        }
+
+        function addMessage(message) {
+            const messagesDiv = document.getElementById("messages");
+            const messageElement = document.createElement("div");
+            messageElement.className = "message";
+            
+            const timestamp = new Date().toLocaleTimeString();
+            messageElement.innerHTML = `<span class="timestamp">[${timestamp}]</span> ${escapeHtml(message)}`;
+            
+            messagesDiv.appendChild(messageElement);
+            scrollToBottom();
+        }
+
+        function addSystemMessage(message) {
+            const messagesDiv = document.getElementById("messages");
+            const messageElement = document.createElement("div");
+            messageElement.className = "message system-message";
+            messageElement.innerHTML = `[SYSTEM] ${message}`;
+            
+            messagesDiv.appendChild(messageElement);
+            scrollToBottom();
+        }
+
+        function scrollToBottom() {
+            const messagesDiv = document.getElementById("messages");
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
         }
 
         function sendMessage() {
             const input = document.getElementById("messageInput");
             const message = input.value.trim();
             
-            if (message && socket && socket.readyState === WebSocket.OPEN) {
-                socket.send(message);
-                input.value = "";
-            } else {
-                alert("Not connected to server");
+            if (message) {
+                if (isConnected) {
+                    socket.send(message);
+                    input.value = "";
+                } else {
+                    addSystemMessage("Not connected to server");
+                }
             }
         }
 
@@ -251,24 +413,41 @@ html_content = """
             try {
                 const response = await fetch("/last-message");
                 const data = await response.json();
-                document.getElementById("lastMessage").innerText = data.message;
+                if (data.message && data.message !== "No messages yet") {
+                    addSystemMessage("Last message: " + data.message);
+                }
             } catch (error) {
                 console.error("Error loading last message:", error);
             }
         }
 
-        // Обработчик нажатия Enter
+        // Обработчики событий
         document.getElementById("messageInput").addEventListener("keypress", function(e) {
             if (e.key === "Enter") {
                 sendMessage();
             }
         });
 
+        // Предотвращаем zoom на двойной тап
+        let lastTouchEnd = 0;
+        document.addEventListener('touchend', function (event) {
+            const now = (new Date()).getTime();
+            if (now - lastTouchEnd <= 300) {
+                event.preventDefault();
+            }
+            lastTouchEnd = now;
+        }, false);
+
         // Автофокус на поле ввода
         document.getElementById("messageInput").focus();
 
         // Запускаем соединение
         connect();
+
+        // Обработка изменения ориентации
+        window.addEventListener('orientationchange', function() {
+            setTimeout(scrollToBottom, 100);
+        });
     </script>
 </body>
 </html>
@@ -288,4 +467,13 @@ app.mount("/static", StaticFiles(directory="/app/static"), name="static")
 @app.on_event("startup")
 async def startup_event():
     init_db()
-    print("WebSocket server started on http://0.0.0.0:8050")
+    await connect_rabbitmq()
+    
+    # Запускаем consumer RabbitMQ в фоне
+    if rabbit_channel:
+        asyncio.create_task(consume_rabbitmq())
+    
+    print("WebSocket server started")
+    print("WebSocket URL: ws://localhost:8050/ws")
+    print("Web interface: http://localhost:8050")
+    print(f"RabbitMQ: {RABBITMQ_HOST}")
